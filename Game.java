@@ -4,35 +4,21 @@ import java.awt.Frame;
 import java.awt.Graphics2D;
 import java.awt.Graphics;
 import java.awt.GraphicsConfiguration;
-import java.awt.Point;
 import java.awt.Rectangle;
-import java.awt.RenderingHints;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.util.LinkedList;
 import java.util.Queue;
 import java.util.concurrent.ThreadLocalRandom;
+import javax.imageio.ImageIO;
 
 public class Game extends Frame {
-	enum Sprite { BIRD, BIRD_FLAPPING, BIRD_HURT, PIPE, PIPE_ENTRY }
-
-	enum State { GAME, GAME_OVER }
-
-	/* TEMP */
-	class GameColor {
-		static final Color SKY = new Color(0x71B2DC);
-		static final Color SCORE = Color.WHITE;
-		static final Color BIRD = Color.ORANGE;
-		static final Color BIRD_FLAPPING = Color.RED;
-		static final Color BIRD_HURT = Color.MAGENTA;
-		static final Color PIPE = new Color(0x4BB575);
-		static final Color PIPE_SHADOW = new Color(0x6BA8CF);
-	}
-
 	class Rect {
 		float x, y, width, height;
 		Rect(float x, float y, float width, float height) {
@@ -43,36 +29,52 @@ public class Game extends Frame {
 		}
 	}
 
+	static final long NANOSEC_IN_SEC = 1000000000, NANOSEC_IN_MS = 1000000;
+
 	/* window */
-	final int WIDTH = 256, HEIGHT = 144;
-	final int WIN_SCALE = 3;
-	final int FPS = 60;
-	final long NANOSEC_TO_SEC = 1000000000, NANOSEC_TO_MS = 1000000;
+	static final int WIDTH = 256, HEIGHT = 144;
+	static final int WIN_SCALE = 3;
+	static final int FPS = 60;
 	float deltaTime;
 
 	/* graphics */
-	final int TILE_SIZE = 16;
-	final Font fontScore;
-	final BufferedImage backBuffer;
+	class Sprite {
+		static final int SIZE = 16;
+
+		static final int BIRD            = 0;
+		static final int BIRD_FLAPPING   = 1;
+		static final int BIRD_HURT       = 2;
+		static final int PIPE            = 3;
+		static final int PIPE_ENTRY_UP   = 4;
+		static final int PIPE_ENTRY_DOWN = 5;
+	}
+	class AssetsNotFoundException extends Exception {
+		AssetsNotFoundException(String message) {
+			super(message);
+		}
+	}
+	static final Font fontScore = new Font(Font.DIALOG, Font.PLAIN, 12);
+	final BufferedImage backBuffer, spriteSheet;
 	final Graphics2D g;
 
 	/* game logic */
+	enum State { GAME, GAME_OVER }
+	static final long FLAP_PERIOD_NS = 400000000;
+	static final float FLIGHT_SPEED = 140;
+	static final float FALL_SPEED = 200;
+	static final float FLAP_SPEED = FALL_SPEED * 2;
 	State state;
 	boolean quit, gameOver;
 	int score;
 	Rect bird;
 	float birdFallSpeed;
 	long birdJumpTime, deltaJumpTime;
-	final long FLAP_PERIOD_NS = 400000000;
-	final float FLIGHT_SPEED = 110;
-	final float FALL_SPEED = 200;
-	final float FLAP_SPEED = FALL_SPEED * 2;
 	final Queue<Rect> pipeGaps = new LinkedList<>();
 
 	final PrintStream log = System.err;
 
 	/* setup */
-	Game() {
+	Game() throws AssetsNotFoundException {
 		super("Flappy");
 
 		log.println("Starting game...");
@@ -83,10 +85,11 @@ public class Game extends Frame {
 
 		int winWidth = WIDTH * WIN_SCALE;
 		int winHeight = HEIGHT * WIN_SCALE;
-		Point winLoc = new Point(bounds.x + bounds.width/2 - winWidth/2, bounds.y + bounds.height/2 - winHeight/2);
+		int winX = bounds.x + bounds.width/2 - winWidth/2;
+		int winY = bounds.y + bounds.height/2 - winHeight/2;
 		setSize(winWidth, winHeight);
-		setLocation(winLoc);
-		log.printf("[debug] win bounds: %dx%d (%d,%d)\n", winWidth, winHeight, winLoc.x, winLoc.y);
+		setLocation(winX, winY);
+		log.printf("[debug] win bounds: %dx%d (%d,%d)\n", winWidth, winHeight, winX, winY);
 
 		setResizable(false);
 
@@ -107,11 +110,20 @@ public class Game extends Frame {
 			}
 		});
 
-		fontScore = new Font(Font.DIALOG, Font.PLAIN, 12);
-
 		backBuffer = new BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_RGB);
 		g = (Graphics2D)backBuffer.getGraphics();
 		g.setPaintMode();
+
+		InputStream is = Game.class.getResourceAsStream("spritesheet.png");
+		if (is == null)
+			throw new AssetsNotFoundException("[error] could not find assets; maybe you forgot '-cp out:assets' or '-cp out;assets'");
+		try {
+			if (is.available() <= 0)
+				throw new AssetsNotFoundException("[error] 'spritesheet.png' is empty or invalid");
+			spriteSheet = ImageIO.read(is);
+		} catch (IOException e) {
+			throw new AssetsNotFoundException("[error] could not read 'spritesheet.png'");
+		}
 
 		quit = false;
 	}
@@ -133,13 +145,13 @@ public class Game extends Frame {
 		state = State.GAME;
 		gameOver = false;
 		score = 0;
-		bird = new Rect(WIDTH/6, TILE_SIZE, TILE_SIZE, TILE_SIZE);
+		bird = new Rect(WIDTH/6, Sprite.SIZE, Sprite.SIZE, Sprite.SIZE);
 		birdJumpTime = 0;
 		birdFallSpeed = FALL_SPEED/2;
 
 		pipeGaps.clear();
 		for (int i = 0; i < 3; ++i)
-			pipeGaps.add(new Rect(WIDTH + TILE_SIZE*8*i, HEIGHT/2 - TILE_SIZE*2 + TILE_SIZE*(1-i), TILE_SIZE, TILE_SIZE*4));
+			pipeGaps.add(new Rect(WIDTH + Sprite.SIZE*8*i, HEIGHT/2 - Sprite.SIZE*2 + Sprite.SIZE*(1-i), Sprite.SIZE, Sprite.SIZE*4));
 	}
 
 	void gameUpdate(long begFrameTime) {
@@ -158,8 +170,8 @@ public class Game extends Frame {
 
 		Rect gap = pipeGaps.peek();
 		if (gap.x + gap.width < 0) {
-			gap.x = WIDTH + TILE_SIZE*8;
-			gap.y = ThreadLocalRandom.current().nextInt(TILE_SIZE/2, HEIGHT - (int)gap.height - TILE_SIZE/2);
+			gap.x = WIDTH + Sprite.SIZE*8;
+			gap.y = ThreadLocalRandom.current().nextInt(Sprite.SIZE/2, HEIGHT - (int)gap.height - Sprite.SIZE/2);
 			pipeGaps.remove();
 			pipeGaps.add(gap);
 
@@ -189,66 +201,64 @@ public class Game extends Frame {
 		g.fillRect((int)r.x, (int)r.y, (int)r.width, (int)r.height);
 	}
 
-	void drawSprite(Sprite sp, Rect r) {
-		Color c;
-		switch (sp) {
-			case BIRD:
-				c = GameColor.BIRD;
-				break;
-			case BIRD_FLAPPING:
-				c = GameColor.BIRD_FLAPPING;
-				break;
-			case BIRD_HURT:
-				c = GameColor.BIRD_HURT;
-				break;
-			case PIPE, PIPE_ENTRY:
-				c = GameColor.PIPE;
-				break;
-			default:
-				c = null;
-		}
-		drawRect(c, r);
+	void drawSprite(int sp, Rect r) {
+		g.drawImage(spriteSheet, (int)r.x, (int)r.y, (int)r.x+(int)r.width, (int)r.y+(int)r.height,
+				(int)r.width*sp, 0, (int)r.width*sp + (int)r.width, (int)r.height, null);
 	}
 
 	void drawPipes(Rect gap) {
-		drawRect(GameColor.PIPE, new Rect(gap.x, 0, gap.width, gap.y));
-		drawRect(GameColor.PIPE_SHADOW, gap);
-		drawRect(GameColor.PIPE, new Rect(gap.x, gap.y+gap.height, gap.width, HEIGHT-(gap.y+gap.height)));
+		for (int offY = (int)gap.y-Sprite.SIZE*2;; offY -= Sprite.SIZE) {
+			drawSprite(Sprite.PIPE, new Rect(gap.x, offY, gap.width, Sprite.SIZE));
+			if (offY < 0)
+				break;
+		}	
+		drawSprite(Sprite.PIPE_ENTRY_DOWN, new Rect(gap.x, gap.y-Sprite.SIZE, gap.width, Sprite.SIZE));
+		drawSprite(Sprite.PIPE_ENTRY_UP, new Rect(gap.x, gap.y+gap.height, gap.width, Sprite.SIZE));
+		for (int offY = (int)gap.y+(int)gap.height + Sprite.SIZE;; offY += Sprite.SIZE) {
+			drawSprite(Sprite.PIPE, new Rect(gap.x, offY, gap.width, Sprite.SIZE));
+			if (offY >= HEIGHT)
+				break;
+		}	
 	}
 
 	void drawScore() {
 		g.setFont(fontScore);
-		g.setColor(GameColor.SCORE);
+		g.setColor(Color.WHITE);
 		g.drawString(Integer.toString(score), 4, 4 + fontScore.getSize());
 	}
 
-	void run() throws InterruptedException {
-		final long frameInterval = NANOSEC_TO_SEC/FPS;
+	void run() throws RuntimeException {
+		final long frameInterval = NANOSEC_IN_SEC/FPS;
 		long begFrameTime, endFrameTime, remainingTime;
 
 		setVisible(true);
 		gameStart();
 
-		while (!quit) {
-			begFrameTime = System.nanoTime();
+		try {
+			while (!quit) {
+				begFrameTime = System.nanoTime();
 
-			gameUpdate(begFrameTime);
-			gameDraw();
+				gameUpdate(begFrameTime);
+				gameDraw();
 
-			if (!gameOver && state == State.GAME_OVER) {
-				Thread.sleep(200);
-				gameOver = true;
-				continue;
+				if (!gameOver && state == State.GAME_OVER) {
+					Thread.sleep(200);
+					gameOver = true;
+					continue;
+				}
+
+				endFrameTime = System.nanoTime();
+				remainingTime = begFrameTime + frameInterval - endFrameTime;
+				if (remainingTime > 0) {
+					Thread.sleep(remainingTime/NANOSEC_IN_MS);
+					deltaTime = (float)frameInterval / NANOSEC_IN_SEC;
+				} else {
+					deltaTime = (float)(endFrameTime - begFrameTime) / NANOSEC_IN_SEC;
+				}
 			}
-
-			endFrameTime = System.nanoTime();
-			remainingTime = begFrameTime + frameInterval - endFrameTime;
-			if (remainingTime > 0) {
-				Thread.sleep(remainingTime/NANOSEC_TO_MS);
-				deltaTime = (float)frameInterval / NANOSEC_TO_SEC;
-			} else {
-				deltaTime = (float)(endFrameTime - begFrameTime) / NANOSEC_TO_SEC;
-			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new RuntimeException("[error] unexpected interrupt");
 		}
 
 		log.println("Bye!");
@@ -257,7 +267,7 @@ public class Game extends Frame {
 
 	@Override
 	public void update(Graphics g) {
-		drawRect(GameColor.SKY, new Rect(0, 0, WIDTH, HEIGHT));
+		drawRect(new Color(0x71B2DC), new Rect(0, 0, WIDTH, HEIGHT));
 		for (Rect gap : pipeGaps)
 			drawPipes(gap);
 		if (state == State.GAME_OVER)
@@ -276,11 +286,15 @@ public class Game extends Frame {
 	}
 
 	public static void main(String args[]) {
-		Game game = new Game();
 		try {
+			Game game = new Game();
 			game.run();
-		} catch (InterruptedException e) {
-			e.printStackTrace();
+		} catch (AssetsNotFoundException e) {
+			System.err.println(e.getMessage());
+			System.exit(1);
+		} catch (RuntimeException e) {
+			System.err.println(e.getMessage());
+			System.exit(2);
 		}
 	}
 }
