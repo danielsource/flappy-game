@@ -3,8 +3,7 @@ import java.awt.Font;
 import java.awt.Frame;
 import java.awt.Graphics2D;
 import java.awt.Graphics;
-import java.awt.GraphicsConfiguration;
-import java.awt.Rectangle;
+import java.awt.Insets;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
@@ -33,9 +32,10 @@ public class Game extends Frame {
 
 	/* window */
 	static final int WIDTH = 256, HEIGHT = 144;
-	static final int WIN_SCALE = 3;
 	static final int FPS = 60;
-	float deltaTime;
+	final Insets winInsets;
+	final int winScale;
+	boolean winReady;
 
 	/* graphics */
 	class Sprite {
@@ -59,39 +59,38 @@ public class Game extends Frame {
 
 	/* game logic */
 	enum State { GAME, GAME_OVER }
-	static final long FLAP_PERIOD_NS = 400000000;
-	static final float FLIGHT_SPEED = 140;
+	static final float FLIGHT_SPEED = 200;
 	static final float FALL_SPEED = 200;
 	static final float FLAP_SPEED = FALL_SPEED * 2;
+	static final long FLAP_PERIOD_NS = 400000000;
 	State state;
 	boolean quit, gameOver;
 	int score;
 	Rect bird;
-	float birdFallSpeed;
-	long birdJumpTime, deltaJumpTime;
+	float fallSpeed;
+	boolean flapping;
+	long flapTime, flapRemaining;
 	final Queue<Rect> pipeGaps = new LinkedList<>();
 
 	final PrintStream log = System.err;
 
 	/* setup */
-	Game() throws AssetsNotFoundException {
+	Game(int winScale) throws AssetsNotFoundException {
 		super("Flappy");
 
 		log.println("Starting game...");
 
-		GraphicsConfiguration gc = getGraphicsConfiguration();
-		Rectangle bounds = gc.getBounds();
-		log.printf("[debug] gc bounds: %dx%d (%d,%d)\n", bounds.width, bounds.height, bounds.x, bounds.y);
-
-		int winWidth = WIDTH * WIN_SCALE;
-		int winHeight = HEIGHT * WIN_SCALE;
-		int winX = bounds.x + bounds.width/2 - winWidth/2;
-		int winY = bounds.y + bounds.height/2 - winHeight/2;
-		setSize(winWidth, winHeight);
-		setLocation(winX, winY);
-		log.printf("[debug] win bounds: %dx%d (%d,%d)\n", winWidth, winHeight, winX, winY);
+		if (winScale <= 0)
+			winScale = 1;
+		this.winScale = winScale;
 
 		setResizable(false);
+		setVisible(true);
+		winInsets = getInsets();
+		int winWidth = WIDTH * winScale + winInsets.left + winInsets.right;
+		int winHeight = HEIGHT * winScale + winInsets.top + winInsets.bottom;
+		setSize(winWidth, winHeight);
+		setLocationRelativeTo(null);
 
 		addWindowListener(new WindowAdapter() {
 			@Override
@@ -106,9 +105,10 @@ public class Game extends Frame {
 				int key = e.getKeyCode();
 				if (key == KeyEvent.VK_SPACE
 				||  key == KeyEvent.VK_UP)
-					gameBirdJump();
+					gameBirdFlap();
 			}
 		});
+
 
 		backBuffer = new BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_RGB);
 		g = (Graphics2D)backBuffer.getGraphics();
@@ -126,44 +126,49 @@ public class Game extends Frame {
 		}
 
 		quit = false;
+		winReady = true;
 	}
 
-	void gameBirdJump() {
+	void gameBirdFlap() {
 		if (gameOver) {
 			gameStart();
 			return;
 		}
 
-		birdJumpTime = System.nanoTime();
-		if (birdFallSpeed < FALL_SPEED)
-			birdFallSpeed = FALL_SPEED;
+		flapping = true;
+		flapTime = System.nanoTime();
+		if (fallSpeed < FALL_SPEED)
+			fallSpeed = FALL_SPEED;
 	}
 
 	void gameStart() {
-		log.printf("[debug] game start (last score: %d)\n", score);
-
 		state = State.GAME;
 		gameOver = false;
 		score = 0;
 		bird = new Rect(WIDTH/6, Sprite.SIZE, Sprite.SIZE, Sprite.SIZE);
-		birdJumpTime = 0;
-		birdFallSpeed = FALL_SPEED/2;
+		flapTime = 0;
+		flapping = false;
+		fallSpeed = FALL_SPEED/2;
 
 		pipeGaps.clear();
 		for (int i = 0; i < 3; ++i)
 			pipeGaps.add(new Rect(WIDTH + Sprite.SIZE*8*i, HEIGHT/2 - Sprite.SIZE*2 + Sprite.SIZE*(1-i), Sprite.SIZE, Sprite.SIZE*4));
 	}
 
-	void gameUpdate(long begFrameTime) {
+	void gameUpdate(long begFrameTime, float deltaTime) {
 		if (state == State.GAME_OVER)
 			return;
 
-		deltaJumpTime = begFrameTime - birdJumpTime;
 
-		bird.y += birdFallSpeed * deltaTime;
+		bird.y += fallSpeed * deltaTime;
 
-		if (deltaJumpTime <= FLAP_PERIOD_NS)
-			bird.y -= FLAP_SPEED * (-((double)deltaJumpTime/FLAP_PERIOD_NS)+1) * deltaTime;
+		if (flapping) {
+			flapRemaining = begFrameTime - flapTime;
+			if (flapRemaining <= FLAP_PERIOD_NS)
+				bird.y -= FLAP_SPEED * (-((double)flapRemaining/FLAP_PERIOD_NS)+1) * deltaTime;
+			else
+				flapping = false;
+		}
 
 		for (Rect gap : pipeGaps)
 			gap.x -= FLIGHT_SPEED * deltaTime;
@@ -230,15 +235,15 @@ public class Game extends Frame {
 	void run() throws RuntimeException {
 		final long frameInterval = NANOSEC_IN_SEC/FPS;
 		long begFrameTime, endFrameTime, remainingTime;
+		float deltaTime = (float)frameInterval / NANOSEC_IN_SEC;
 
-		setVisible(true);
 		gameStart();
 
 		try {
 			while (!quit) {
 				begFrameTime = System.nanoTime();
 
-				gameUpdate(begFrameTime);
+				gameUpdate(begFrameTime, deltaTime);
 				gameDraw();
 
 				if (!gameOver && state == State.GAME_OVER) {
@@ -267,17 +272,21 @@ public class Game extends Frame {
 
 	@Override
 	public void update(Graphics g) {
+		if (!winReady)
+			return;
+
 		drawRect(new Color(0x71B2DC), new Rect(0, 0, WIDTH, HEIGHT));
 		for (Rect gap : pipeGaps)
 			drawPipes(gap);
 		if (state == State.GAME_OVER)
 			drawSprite(Sprite.BIRD_HURT, bird);
-		else if (deltaJumpTime <= FLAP_PERIOD_NS * 0.5f)
+		else if (flapping && flapRemaining <= FLAP_PERIOD_NS * 0.5f)
 			drawSprite(Sprite.BIRD_FLAPPING, bird);
 		else
 			drawSprite(Sprite.BIRD, bird);
 		drawScore();
-		g.drawImage(backBuffer, 0, 0, WIDTH * WIN_SCALE, HEIGHT * WIN_SCALE, null);
+
+		g.drawImage(backBuffer, winInsets.left, winInsets.top, WIDTH * winScale, HEIGHT * winScale, null);
 	}
 
 	@Override
@@ -286,8 +295,9 @@ public class Game extends Frame {
 	}
 
 	public static void main(String args[]) {
+		int winScale = (args.length == 1) ? Integer.parseInt(args[0]) : 3;
 		try {
-			Game game = new Game();
+			Game game = new Game(winScale);
 			game.run();
 		} catch (AssetsNotFoundException e) {
 			System.err.println(e.getMessage());

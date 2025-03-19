@@ -12,4 +12,4 @@ for s in $sources; do
 	fi
 done
 
-java -cp out:assets Game
+java -cp 'out:assets' Game "$@"
